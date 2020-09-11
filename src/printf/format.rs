@@ -10,6 +10,9 @@ use crate::printf::format::Chunk::Literal;
 
 use core::ffi::c_void;
 use core::intrinsics::write_bytes;
+use crate::variadic::VaList;
+use crate::strlen::strlen;
+use core::slice::from_raw_parts;
 
 #[derive(Debug)]
 pub enum FormatSpec {
@@ -39,8 +42,9 @@ impl<'a> FormatOutput<'a> {
 
     fn write_bytes(&mut self, bytes: &[u8]) -> core::result::Result<usize, ()> {
         let mut len_to_write = bytes.len();
-        if len_to_write > self.output.len() - self.pos {
-            len_to_write = self.output.len() - self.pos;
+        // reserve a space for null terminator
+        if len_to_write > self.output.len() - (self.pos + 1) {
+            len_to_write = self.output.len() - (self.pos + 1);
         }
 
         for b in bytes[0..len_to_write].iter() {
@@ -61,24 +65,25 @@ impl<'a> Write for FormatOutput<'a> {
         match self.write_bytes(s.as_bytes()) {
             Ok(_) => {
                 Ok(())
-            },
+            }
             Err(_) => {
                 Err(core::fmt::Error)
-            },
+            }
         }
     }
 }
 
 impl FormatSpec {
-    fn merge(&self, mut output: &mut FormatOutput, arg_ptr: *const c_void) -> usize {
+    //fn merge(&self, mut output: &mut FormatOutput, arg_ptr: *const c_void) -> usize {
+    fn merge(&self, mut output: &mut FormatOutput, va_list: &mut VaList) -> usize {
         match self {
             FormatSpec::Char => {
-                let value = unsafe { (arg_ptr as *const char).read() };
-                core::fmt::write(&mut output, format_args!("{}", value) );
+                let value: char = va_list.va_arg::<char>();
+                core::fmt::write(&mut output, format_args!("{}", value));
             }
             FormatSpec::Decimal(_) => {
-                let value = unsafe { (arg_ptr as *const u32).read() };
-                core::fmt::write(&mut output, format_args!("{}", value) );
+                let value: u32 = va_list.va_arg::<u32>();
+                core::fmt::write(&mut output, format_args!("{}", value));
             }
             /*
             FormatSpec::ExponentialFloatingPoint => {
@@ -92,21 +97,25 @@ impl FormatSpec {
             }
             */
             FormatSpec::Octal(_) => {
-                let value = unsafe { (arg_ptr as *const u32).read() };
-                core::fmt::write(&mut output, format_args!("{:o}", value) );
+                let value: u32 = va_list.va_arg::<u32>();
+                core::fmt::write(&mut output, format_args!("{:o}", value));
+            }
+            FormatSpec::String => {
+                let value_ptr = va_list.va_arg::<*const u8>();
+                let len = strlen(value_ptr);
+                let slice = unsafe { from_raw_parts(value_ptr, len) };
+                output.write_bytes(slice as &[u8]);
             }
             /*
-            FormatSpec::String => {
-            }
             FormatSpec::UnsignedDecimal(_) => {
 
             }
             */
             FormatSpec::Hexadecimal(_) => {
-                let value = unsafe { (arg_ptr as *const u32).read() };
-                core::fmt::write(&mut output, format_args!("{:x}", value) );
+                let value: u32 = va_list.va_arg::<u32>();
+                core::fmt::write(&mut output, format_args!("{:x}", value));
             }
-            _ => { }
+            _ => {}
         }
         output.pos
     }
@@ -121,10 +130,9 @@ pub enum DecimalFormat {
 }
 
 impl FormatSpec {
-    pub fn from(spec: &str) -> Option<FormatSpec> {
-        let bytes = spec.as_bytes();
-        let c = bytes[bytes.len() - 1usize] as char;
-        let mut format = "";
+    pub fn from(spec: &[u8]) -> Option<FormatSpec> {
+        let c = spec[spec.len() - 1usize] as char;
+        let mut format = "".as_bytes();
         if spec.len() != 1 {
             format = &spec[0..spec.len() - 2];
         }
@@ -142,30 +150,30 @@ impl FormatSpec {
         }
     }
 
-    fn parse_simple_number_format(fmt: &str) -> DecimalFormat {
+    fn parse_simple_number_format(fmt: &[u8]) -> DecimalFormat {
         if fmt.len() == 0 {
             return DecimalFormat::Unconstrained;
         }
 
-        let first = fmt.as_bytes()[0] as char;
+        let first = fmt[0] as char;
 
         match first {
             '-' => {
                 // left
-                let num = atoi_usize(fmt[1..fmt.len()].as_bytes());
+                let num = atoi_usize(&fmt[1..fmt.len()]);
                 if let Some(num) = num {
                     return DecimalFormat::LeftJustified(num);
                 }
             }
             '0' => {
                 // zero filled
-                let num = atoi_usize(fmt[1..fmt.len()].as_bytes());
+                let num = atoi_usize(&fmt[1..fmt.len()]);
                 if let Some(num) = num {
                     return DecimalFormat::ZeroFilled(num);
                 }
             }
             _ => {
-                let num = atoi_usize(fmt.as_bytes());
+                let num = atoi_usize(fmt);
                 if let Some(num) = num {
                     return DecimalFormat::SpaceFilled(num);
                 }
@@ -178,32 +186,55 @@ impl FormatSpec {
 
 #[derive(Debug)]
 pub enum Chunk<'a> {
-    Literal(&'a str),
+    Literal(&'a [u8]),
     Format(FormatSpec),
 }
 
 #[derive(Debug)]
 pub struct FormatString<'a> {
-    format: &'a str,
+    format: &'a [u8],
     chunks: Vec<Chunk<'a>, U64>,
 }
 
-fn is_spec_type(c: char) -> bool {
+fn is_spec_type(c: u8) -> bool {
     match c {
-        'c' | 'd' | 'e' | 'f' | 'i' | 'o' | 's' | 'u' | 'x' => true,
+        b'c' | b'd' | b'e' | b'f' | b'i' | b'o' | b's' | b'u' | b'x' => true,
         _ => false,
     }
 }
 
+fn find(slice: &[u8], needle: u8) -> Option<usize> {
+    for (index, n) in slice.iter().enumerate() {
+        if *n == needle {
+            return Some(index);
+        }
+    }
+
+    None
+}
+
+fn find_if(slice: &[u8], searcher: &dyn Fn(u8) -> bool) -> Option<usize> {
+    for (index, n) in slice.iter().enumerate() {
+        if searcher(*n) {
+            return Some(index);
+        }
+    }
+
+    None
+}
+
+
 impl<'a> FormatString<'a> {
-    pub fn from(format: &'a str) -> Self {
+    pub fn from(format: &'a [u8]) -> Self {
         let mut cur = 0;
         let len = format.len();
 
         let mut chunks = Vec::new();
 
+        let s: &str;
+
         loop {
-            let perc = format[cur..len].find('%');
+            let perc = find(&format[cur..len], b'%');
             match perc {
                 None => {
                     chunks.push(Literal(&format[cur..format.len()]));
@@ -216,7 +247,7 @@ impl<'a> FormatString<'a> {
                         chunks.push(Literal(&format[cur..loc]));
                     }
 
-                    let spec_type = format[loc..len].find(is_spec_type);
+                    let spec_type = find_if(&format[loc..len], &is_spec_type);
                     match spec_type {
                         None => {
                             break;
@@ -241,30 +272,32 @@ impl<'a> FormatString<'a> {
         }
     }
 
-    pub(crate) fn merge<'output>(&self, output: &'output mut [u8], args: &[*const c_void]) -> &'output [u8] {
-        let mut cur_arg = 0;
+    pub(crate) fn merge<'output>(&self, output: &'output mut [u8], va_list: &mut VaList) -> &'output mut [u8] {
         let mut cur_output_index = 0;
         let len = output.len();
         for format_chunk in self.chunks.iter() {
             let mut output_target = &mut FormatOutput::wrap(&mut output[cur_output_index..len]);
             match format_chunk {
                 Literal(s) => {
-                    let bytes = s.as_bytes();
+                    let bytes = s;
                     output_target.write_bytes(bytes);
                     cur_output_index += bytes.len();
                 }
                 Chunk::Format(spec) => {
-                    let len = spec.merge(output_target, args[cur_arg]);
-                    cur_arg += 1;
+                    let len = spec.merge(output_target, va_list);
                     cur_output_index += len;
                 }
             }
         }
 
-        &mut output[0..cur_output_index]
+        let mut ret = &mut output[0..cur_output_index + 1];
+        // terminate with a null
+        ret[cur_output_index] = 0;
+        ret
     }
 }
 
+/*
 #[cfg(test)]
 mod tests {
     use super::{FormatString, FormatSpec, DecimalFormat};
@@ -319,3 +352,5 @@ mod tests {
         //assert_eq!(2 + 2, 4);
     }
 }
+
+ */
