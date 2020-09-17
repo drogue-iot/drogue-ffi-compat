@@ -1,15 +1,11 @@
 use heapless::{
-    ArrayLength,
     Vec,
     consts::*,
 };
-use core::fmt::Result;
 use core::fmt::Write;
 use crate::atoi::atoi_usize;
 use crate::printf::format::Chunk::Literal;
 
-use core::ffi::c_void;
-use core::intrinsics::write_bytes;
 use crate::variadic::VaList;
 use crate::strlen::strlen;
 use core::slice::from_raw_parts;
@@ -29,7 +25,7 @@ pub enum FormatSpec {
 
 struct FormatOutput<'a> {
     output: &'a mut [u8],
-    pos: usize,
+    pub pos: usize,
 }
 
 impl<'a> FormatOutput<'a> {
@@ -79,11 +75,15 @@ impl FormatSpec {
         match self {
             FormatSpec::Char => {
                 let value: char = va_list.va_arg::<char>();
-                core::fmt::write(&mut output, format_args!("{}", value));
+                core::fmt::write(&mut output, format_args!("{}", value)).unwrap();
             }
             FormatSpec::Decimal(_) => {
+                let value: i32 = va_list.va_arg::<i32>();
+                core::fmt::write(&mut output, format_args!("{}", value)).unwrap();
+            }
+            FormatSpec::UnsignedDecimal(_) => {
                 let value: u32 = va_list.va_arg::<u32>();
-                core::fmt::write(&mut output, format_args!("{}", value));
+                core::fmt::write(&mut output, format_args!("{}", value)).unwrap();
             }
             /*
             FormatSpec::ExponentialFloatingPoint => {
@@ -98,13 +98,13 @@ impl FormatSpec {
             */
             FormatSpec::Octal(_) => {
                 let value: u32 = va_list.va_arg::<u32>();
-                core::fmt::write(&mut output, format_args!("{:o}", value));
+                core::fmt::write(&mut output, format_args!("{:o}", value)).unwrap();
             }
             FormatSpec::String => {
                 let value_ptr = va_list.va_arg::<*const u8>();
                 let len = strlen(value_ptr);
                 let slice = unsafe { from_raw_parts(value_ptr, len) };
-                output.write_bytes(slice as &[u8]);
+                output.write_bytes(slice as &[u8]).unwrap();
             }
             /*
             FormatSpec::UnsignedDecimal(_) => {
@@ -113,7 +113,7 @@ impl FormatSpec {
             */
             FormatSpec::Hexadecimal(_) => {
                 let value: u32 = va_list.va_arg::<u32>();
-                core::fmt::write(&mut output, format_args!("{:x}", value));
+                core::fmt::write(&mut output, format_args!("{:x}", value)).unwrap();
             }
             _ => {}
         }
@@ -132,7 +132,7 @@ pub enum DecimalFormat {
 impl FormatSpec {
     pub fn from(spec: &[u8]) -> Option<FormatSpec> {
         let c = spec[spec.len() - 1usize] as char;
-        let mut format = "".as_bytes();
+        let mut format: &[u8] = b"";
         if spec.len() != 1 {
             format = &spec[0..spec.len() - 2];
         }
@@ -145,13 +145,13 @@ impl FormatSpec {
             'o' => Some(FormatSpec::Octal(Self::parse_simple_number_format(format))),
             's' => Some(FormatSpec::String),
             'u' => Some(FormatSpec::UnsignedDecimal(Self::parse_simple_number_format(format))),
-            'x' => Some(FormatSpec::Hexadecimal(Self::parse_simple_number_format(format))),
+            'x' | 'X' => Some(FormatSpec::Hexadecimal(Self::parse_simple_number_format(format))),
             _ => None,
         }
     }
 
     fn parse_simple_number_format(fmt: &[u8]) -> DecimalFormat {
-        if fmt.len() == 0 {
+        if fmt.is_empty() {
             return DecimalFormat::Unconstrained;
         }
 
@@ -193,12 +193,12 @@ pub enum Chunk<'a> {
 #[derive(Debug)]
 pub struct FormatString<'a> {
     format: &'a [u8],
-    chunks: Vec<Chunk<'a>, U64>,
+    pub(crate) chunks: Vec<Chunk<'a>, U64>,
 }
 
 fn is_spec_type(c: u8) -> bool {
     match c {
-        b'c' | b'd' | b'e' | b'f' | b'i' | b'o' | b's' | b'u' | b'x' => true,
+        b'c' | b'd' | b'e' | b'f' | b'i' | b'o' | b's' | b'u' | b'x' | b'X' => true,
         _ => false,
     }
 }
@@ -231,20 +231,18 @@ impl<'a> FormatString<'a> {
 
         let mut chunks = Vec::new();
 
-        let s: &str;
-
         loop {
             let perc = find(&format[cur..len], b'%');
             match perc {
                 None => {
-                    chunks.push(Literal(&format[cur..format.len()]));
+                    chunks.push(Literal(&format[cur..format.len()])).unwrap();
                     break;
                 }
                 Some(loc) => {
                     let loc = loc + cur;
                     if loc > cur {
                         // there's a literal gap
-                        chunks.push(Literal(&format[cur..loc]));
+                        chunks.push(Literal(&format[cur..loc])).unwrap();
                     }
 
                     let spec_type = find_if(&format[loc..len], &is_spec_type);
@@ -253,11 +251,11 @@ impl<'a> FormatString<'a> {
                             break;
                         }
                         Some(mut spec_loc) => {
-                            spec_loc = spec_loc + loc;
+                            spec_loc += loc;
                             let spec = FormatSpec::from(&format[loc + 1..spec_loc + 1]);
                             if let Some(spec) = spec {
                                 //println!("spec: {:?}", spec);
-                                chunks.push(Chunk::Format(spec));
+                                chunks.push(Chunk::Format(spec)).unwrap();
                             }
                             cur = spec_loc + 1;
                         }
@@ -276,11 +274,11 @@ impl<'a> FormatString<'a> {
         let mut cur_output_index = 0;
         let len = output.len();
         for format_chunk in self.chunks.iter() {
-            let mut output_target = &mut FormatOutput::wrap(&mut output[cur_output_index..len]);
+            let output_target = &mut FormatOutput::wrap(&mut output[cur_output_index..len]);
             match format_chunk {
                 Literal(s) => {
                     let bytes = s;
-                    output_target.write_bytes(bytes);
+                    output_target.write_bytes(bytes).unwrap();
                     cur_output_index += bytes.len();
                 }
                 Chunk::Format(spec) => {
@@ -290,50 +288,48 @@ impl<'a> FormatString<'a> {
             }
         }
 
-        let mut ret = &mut output[0..cur_output_index + 1];
         // terminate with a null
+        //log::info!("formatted len={}", cur_output_index);
+        //log::info!("return [{}]", core::str::from_utf8(&output[0..cur_output_index]).unwrap());
+        let ret = &mut output[0..cur_output_index + 1];
         ret[cur_output_index] = 0;
         ret
     }
 }
 
-/*
 #[cfg(test)]
 mod tests {
-    use super::{FormatString, FormatSpec, DecimalFormat};
+    use super::{FormatString, FormatSpec, DecimalFormat, Chunk};
     use core::ffi::c_void;
     use crate::printf::format::FormatOutput;
 
+    use core::prelude::*;
+
     #[test]
     fn parse_simple_number_format() {
-        let fmt = FormatSpec::parse_simple_number_format("");
+        let fmt = FormatSpec::parse_simple_number_format(b"");
         assert_eq!(fmt, DecimalFormat::Unconstrained);
 
-        let fmt = FormatSpec::parse_simple_number_format("32");
+        let fmt = FormatSpec::parse_simple_number_format(b"32");
         assert_eq!(fmt, DecimalFormat::SpaceFilled(32));
 
-        let fmt = FormatSpec::parse_simple_number_format("032");
+        let fmt = FormatSpec::parse_simple_number_format(b"032");
         assert_eq!(fmt, DecimalFormat::ZeroFilled(32));
 
-        let fmt = FormatSpec::parse_simple_number_format("-32");
+        let fmt = FormatSpec::parse_simple_number_format(b"-32");
         assert_eq!(fmt, DecimalFormat::LeftJustified(32));
     }
 
     #[test]
-    fn format_spec_merge() {
-        let spec = FormatSpec::Decimal(DecimalFormat::Unconstrained);
-        let mut output: [u8;128] = [0; 128];
-        let mut output = FormatOutput::wrap(&mut output);
-        let arg = 42;
-        let arg_ptr = &arg;
-        spec.merge(&mut output, (arg_ptr as *const _ as *const c_void));
-        println!( "{}", core::str::from_utf8( output.as_bytes() ).unwrap() );
-        //assert_eq!(2 + 2, 4);
+    fn parse_format_str() {
+        let fmt = FormatString::from(b"%showdy");
+        assert_eq!(2, fmt.chunks.len());
     }
 
+    /*
     #[test]
     fn format_string_merge() {
-        let fmt: FormatString = FormatString::from("%d howdy [0x%x]");
+        let fmt: FormatString = FormatString::from(b"%d howdy [0x%x]");
         let arg1 = 42;
         let arg1_ptr = &arg1;
 
@@ -351,6 +347,5 @@ mod tests {
         //println!("----> {:?}", fmt);
         //assert_eq!(2 + 2, 4);
     }
+     */
 }
-
- */
